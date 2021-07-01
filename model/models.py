@@ -14,42 +14,40 @@ class BaseModel(torch.nn.Module):
 		return self.bceloss(pred, true_label)
 		
 class CompGCNBase(BaseModel):
-	def __init__(self, edge_index, edge_type, num_rel, params=None):
+	def __init__(self, edge_index, params=None):
 		super(CompGCNBase, self).__init__(params)
 
 		self.edge_index		= edge_index
-		self.edge_type		= edge_type
 		self.p.gcn_dim		= self.p.embed_dim if self.p.gcn_layer == 1 else self.p.gcn_dim
-		self.init_embed		= get_param((self.p.num_ent,   self.p.init_dim))
+
 		self.device		= self.edge_index.device
+		# if self.p.num_bases > 0:
+		# 	self.init_rel  = get_param((self.p.num_bases,   self.p.init_dim))
+		# else:
+		# 	if self.p.score_func == 'transe': 	self.init_rel = get_param((num_rel,   self.p.init_dim))
+		# 	else: 					self.init_rel = get_param((num_rel*2, self.p.init_dim))
 
 		if self.p.num_bases > 0:
-			self.init_rel  = get_param((self.p.num_bases,   self.p.init_dim))
+			self.conv1 = CompGCNConvBasis(self.p.init_dim, self.p.gcn_dim, self.p.num_bases, act=self.act, params=self.p)
+			self.conv2 = CompGCNConv(self.p.gcn_dim,    self.p.embed_dim, act=self.act, params=self.p) if self.p.gcn_layer == 2 else None
 		else:
-			if self.p.score_func == 'transe': 	self.init_rel = get_param((num_rel,   self.p.init_dim))
-			else: 					self.init_rel = get_param((num_rel*2, self.p.init_dim))
+			self.conv1 = CompGCNConv(self.p.init_dim, self.p.gcn_dim, act=self.act, params=self.p)
+			self.conv2 = CompGCNConv(self.p.gcn_dim,    self.p.embed_dim, act=self.act, params=self.p) if self.p.gcn_layer == 2 else None
 
-		if self.p.num_bases > 0:
-			self.conv1 = CompGCNConvBasis(self.p.init_dim, self.p.gcn_dim, num_rel, self.p.num_bases, act=self.act, params=self.p)
-			self.conv2 = CompGCNConv(self.p.gcn_dim,    self.p.embed_dim,    num_rel, act=self.act, params=self.p) if self.p.gcn_layer == 2 else None
-		else:
-			self.conv1 = CompGCNConv(self.p.init_dim, self.p.gcn_dim,      num_rel, act=self.act, params=self.p)
-			self.conv2 = CompGCNConv(self.p.gcn_dim,    self.p.embed_dim,    num_rel, act=self.act, params=self.p) if self.p.gcn_layer == 2 else None
+		# self.register_parameter('bias', Parameter(torch.zeros(self.p.num_ent)))
 
-		self.register_parameter('bias', Parameter(torch.zeros(self.p.num_ent)))
+	def forward_base(self, node_features, edge_features, drop1, drop2):
 
-	def forward_base(self, sub, rel, drop1, drop2):
-
-		r	= self.init_rel if self.p.score_func != 'transe' else torch.cat([self.init_rel, -self.init_rel], dim=0)
-		x, r	= self.conv1(self.init_embed, self.edge_index, self.edge_type, rel_embed=r)
+		# r	= self.init_rel if self.p.score_func != 'transe' else torch.cat([self.init_rel, -self.init_rel], dim=0)
+		x, r	= self.conv1(node_features, self.edge_index, rel_emb=edge_features)
 		x	= drop1(x)
-		x, r	= self.conv2(x, self.edge_index, self.edge_type, rel_embed=r) 	if self.p.gcn_layer == 2 else (x, r)
+		x, r	= self.conv2(x, self.edge_index, rel_emb=r) 	if self.p.gcn_layer == 2 else (x, r)
 		x	= drop2(x) 							if self.p.gcn_layer == 2 else x
 
-		sub_emb	= torch.index_select(x, 0, sub)
-		rel_emb	= torch.index_select(r, 0, rel)
+		# sub_emb	= torch.index_select(x, 0, sub)
+		# rel_emb	= torch.index_select(r, 0, rel)
 
-		return sub_emb, rel_emb, x
+		return x, r, x
 
 
 class CompGCN_TransE(CompGCNBase):
@@ -84,8 +82,8 @@ class CompGCN_DistMult(CompGCNBase):
 		return score
 
 class CompGCN_ConvE(CompGCNBase):
-	def __init__(self, edge_index, edge_type, params=None):
-		super(self.__class__, self).__init__(edge_index, edge_type, params.num_rel, params)
+	def __init__(self, edge_index, params=None):
+		super(self.__class__, self).__init__(edge_index, params)
 
 		self.bn0		= torch.nn.BatchNorm2d(1)
 		self.bn1		= torch.nn.BatchNorm2d(self.p.num_filt)
@@ -104,13 +102,34 @@ class CompGCN_ConvE(CompGCNBase):
 	def concat(self, e1_embed, rel_embed):
 		e1_embed	= e1_embed. view(-1, 1, self.p.embed_dim)
 		rel_embed	= rel_embed.view(-1, 1, self.p.embed_dim)
+		
 		stack_inp	= torch.cat([e1_embed, rel_embed], 1)
 		stack_inp	= torch.transpose(stack_inp, 2, 1).reshape((-1, 1, 2*self.p.k_w, self.p.k_h))
 		return stack_inp
 
-	def forward(self, sub, rel):
+	# def forward(self, sub, rel):
 
-		sub_emb, rel_emb, all_ent	= self.forward_base(sub, rel, self.hidden_drop, self.feature_drop)
+	# 	sub_emb, rel_emb, all_ent	= self.forward_base(sub, rel, self.hidden_drop, self.feature_drop)
+	# 	stk_inp				= self.concat(sub_emb, rel_emb)
+	# 	x				= self.bn0(stk_inp)
+	# 	x				= self.m_conv1(x)
+	# 	x				= self.bn1(x)
+	# 	x				= F.relu(x)
+	# 	x				= self.feature_drop(x)
+	# 	x				= x.view(-1, self.flat_sz)
+	# 	x				= self.fc(x)
+	# 	x				= self.hidden_drop2(x)
+	# 	x				= self.bn2(x)
+	# 	x				= F.relu(x)
+
+	# 	x = torch.mm(x, all_ent.transpose(1,0))
+	# 	x += self.bias.expand_as(x)
+
+	# 	score = torch.sigmoid(x)
+	# 	return score
+	def forward(self, node_features, edge_features):
+
+		sub_emb, rel_emb, all_ent	= self.forward_base(node_features, edge_features, self.hidden_drop, self.feature_drop)
 		stk_inp				= self.concat(sub_emb, rel_emb)
 		x				= self.bn0(stk_inp)
 		x				= self.m_conv1(x)
@@ -124,7 +143,7 @@ class CompGCN_ConvE(CompGCNBase):
 		x				= F.relu(x)
 
 		x = torch.mm(x, all_ent.transpose(1,0))
-		x += self.bias.expand_as(x)
+		# x += self.bias.expand_as(x)
 
 		score = torch.sigmoid(x)
 		return score
